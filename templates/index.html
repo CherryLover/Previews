@@ -81,6 +81,11 @@
             border-color: #667eea;
         }
         
+        .btn-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+        
         .btn {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -91,6 +96,8 @@
             font-weight: 500;
             cursor: pointer;
             transition: transform 0.2s ease, box-shadow 0.2s ease;
+            margin: 0 5px;
+            display: inline-block;
         }
         
         .btn:hover {
@@ -105,42 +112,25 @@
             box-shadow: none;
         }
         
-        .result-container {
-            background: white;
-            border-radius: 16px;
-            padding: 30px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-            margin-top: 20px;
+        .btn-success {
+            background: linear-gradient(135deg, #34c759 0%, #30d158 100%);
+        }
+        
+        .btn-success:hover {
+            box-shadow: 0 8px 25px rgba(52, 199, 89, 0.4);
+        }
+        
+        .btn-secondary {
+            background: linear-gradient(135deg, #8e8e93 0%, #636366 100%);
+        }
+        
+        .btn-secondary:hover {
+            box-shadow: 0 8px 25px rgba(142, 142, 147, 0.4);
+        }
+        
+        .action-buttons {
+            margin-top: 15px;
             display: none;
-        }
-        
-        .result-success {
-            border-left: 4px solid #34c759;
-        }
-        
-        .result-error {
-            border-left: 4px solid #ff3b30;
-        }
-        
-        .result-url {
-            background: #f6f6f6;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-            font-size: 14px;
-            margin: 15px 0;
-            word-break: break-all;
-        }
-        
-        .copy-btn {
-            background: #34c759;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            font-size: 14px;
-            cursor: pointer;
-            margin-left: 10px;
         }
         
         .loading {
@@ -183,9 +173,24 @@
                         required
                     ></textarea>
                 </div>
-                <button type="submit" class="btn" id="submitBtn">
-                    生成预览链接
-                </button>
+                
+                <div class="btn-container">
+                    <button type="submit" class="btn" id="submitBtn">
+                        生成预览链接
+                    </button>
+                    
+                    <div class="action-buttons" id="actionButtons">
+                        <button class="btn btn-success" id="previewBtn" onclick="openPreview()">
+                            前往预览
+                        </button>
+                        <button class="btn btn-secondary" id="copyBtn" onclick="copyLink()">
+                            复制链接
+                        </button>
+                        <button type="button" class="btn" id="regenerateBtn" onclick="regenerate()">
+                            重新生成
+                        </button>
+                    </div>
+                </div>
             </form>
             
             <div class="loading" id="loading">
@@ -193,21 +198,17 @@
                 <p>正在生成预览链接...</p>
             </div>
         </div>
-        
-        <div class="result-container" id="resultContainer">
-            <h3 id="resultTitle">结果</h3>
-            <p id="resultMessage"></p>
-            <div id="resultUrl"></div>
-        </div>
     </div>
 
     <script>
+        let currentUrl = '';
+        
         document.getElementById('htmlForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const submitBtn = document.getElementById('submitBtn');
             const loading = document.getElementById('loading');
-            const resultContainer = document.getElementById('resultContainer');
+            const actionButtons = document.getElementById('actionButtons');
             const htmlContent = document.getElementById('htmlContent').value;
             
             if (!htmlContent.trim()) {
@@ -218,7 +219,6 @@
             // 显示加载状态
             submitBtn.disabled = true;
             loading.style.display = 'block';
-            resultContainer.style.display = 'none';
             
             try {
                 const formData = new FormData();
@@ -235,52 +235,69 @@
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
                 
-                // 显示结果
-                resultContainer.style.display = 'block';
-                
                 if (result.success) {
-                    resultContainer.className = 'result-container result-success';
-                    document.getElementById('resultTitle').textContent = '✅ 成功';
-                    document.getElementById('resultMessage').textContent = result.message;
-                    document.getElementById('resultUrl').innerHTML = `
-                        <p><strong>预览链接:</strong></p>
-                        <div class="result-url">
-                            ${result.url}
-                            <button class="copy-btn" onclick="copyToClipboard('${result.url}')">复制</button>
-                        </div>
-                        <p><a href="${result.url}" target="_blank">点击打开预览页面</a></p>
-                    `;
+                    currentUrl = result.url;
+                    // 隐藏生成按钮，显示操作按钮
+                    submitBtn.style.display = 'none';
+                    actionButtons.style.display = 'inline-block';
                 } else {
-                    resultContainer.className = 'result-container result-error';
-                    document.getElementById('resultTitle').textContent = '❌ 错误';
-                    document.getElementById('resultMessage').textContent = result.error;
-                    document.getElementById('resultUrl').innerHTML = '';
+                    alert('错误: ' + result.error);
                 }
                 
             } catch (error) {
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
-                resultContainer.style.display = 'block';
-                resultContainer.className = 'result-container result-error';
-                document.getElementById('resultTitle').textContent = '❌ 错误';
-                document.getElementById('resultMessage').textContent = '网络错误，请稍后重试';
-                document.getElementById('resultUrl').innerHTML = '';
+                alert('网络错误，请稍后重试');
             }
         });
         
-        function copyToClipboard(text) {
-            navigator.clipboard.writeText(text).then(function() {
-                alert('链接已复制到剪贴板');
+        function openPreview() {
+            if (currentUrl) {
+                window.open(currentUrl, '_blank');
+            }
+        }
+        
+        function copyLink() {
+            if (!currentUrl) return;
+            
+            navigator.clipboard.writeText(currentUrl).then(function() {
+                const copyBtn = document.getElementById('copyBtn');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+                copyBtn.style.background = 'linear-gradient(135deg, #34c759 0%, #30d158 100%)';
+                
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = 'linear-gradient(135deg, #8e8e93 0%, #636366 100%)';
+                }, 2000);
             }).catch(function() {
                 // 降级方案
                 const textArea = document.createElement('textarea');
-                textArea.value = text;
+                textArea.value = currentUrl;
                 document.body.appendChild(textArea);
                 textArea.select();
                 document.execCommand('copy');
                 document.body.removeChild(textArea);
                 alert('链接已复制到剪贴板');
             });
+        }
+        
+        function regenerate() {
+            // 回到初始状态
+            const submitBtn = document.getElementById('submitBtn');
+            const actionButtons = document.getElementById('actionButtons');
+            const htmlContent = document.getElementById('htmlContent');
+            
+            // 显示生成按钮，隐藏操作按钮
+            submitBtn.style.display = 'inline-block';
+            actionButtons.style.display = 'none';
+            
+            // 清空数据和输入框内容
+            currentUrl = '';
+            htmlContent.value = '';
+            
+            // 聚焦到文本框
+            htmlContent.focus();
         }
     </script>
 </body>
