@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML 预览工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .header p {
+            font-size: 1.1rem;
+            color: #6e6e73;
+        }
+        
+        .form-container {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            margin-bottom: 30px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 8px;
+            color: #1d1d1f;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 300px;
+            padding: 15px;
+            border: 2px solid #e5e5e7;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            resize: vertical;
+            transition: border-color 0.3s ease;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .result-container {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .result-success {
+            border-left: 4px solid #34c759;
+        }
+        
+        .result-error {
+            border-left: 4px solid #ff3b30;
+        }
+        
+        .result-url {
+            background: #f6f6f6;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            margin: 15px 0;
+            word-break: break-all;
+        }
+        
+        .copy-btn {
+            background: #34c759;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>HTML 预览工具</h1>
+            <p>粘贴您的 HTML 代码，获取可分享的预览链接</p>
+        </div>
+        
+        <div class="form-container">
+            <form id="htmlForm">
+                <div class="form-group">
+                    <label for="htmlContent">HTML 代码:</label>
+                    <textarea 
+                        id="htmlContent" 
+                        name="html_content" 
+                        placeholder="请在此处粘贴您的 HTML 代码..."
+                        required
+                    ></textarea>
+                </div>
+                <button type="submit" class="btn" id="submitBtn">
+                    生成预览链接
+                </button>
+            </form>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>正在生成预览链接...</p>
+            </div>
+        </div>
+        
+        <div class="result-container" id="resultContainer">
+            <h3 id="resultTitle">结果</h3>
+            <p id="resultMessage"></p>
+            <div id="resultUrl"></div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('htmlForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const loading = document.getElementById('loading');
+            const resultContainer = document.getElementById('resultContainer');
+            const htmlContent = document.getElementById('htmlContent').value;
+            
+            if (!htmlContent.trim()) {
+                alert('请输入HTML内容');
+                return;
+            }
+            
+            // 显示加载状态
+            submitBtn.disabled = true;
+            loading.style.display = 'block';
+            resultContainer.style.display = 'none';
+            
+            try {
+                const formData = new FormData();
+                formData.append('html_content', htmlContent);
+                
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                // 隐藏加载状态
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+                
+                // 显示结果
+                resultContainer.style.display = 'block';
+                
+                if (result.success) {
+                    resultContainer.className = 'result-container result-success';
+                    document.getElementById('resultTitle').textContent = '✅ 成功';
+                    document.getElementById('resultMessage').textContent = result.message;
+                    document.getElementById('resultUrl').innerHTML = `
+                        <p><strong>预览链接:</strong></p>
+                        <div class="result-url">
+                            ${result.url}
+                            <button class="copy-btn" onclick="copyToClipboard('${result.url}')">复制</button>
+                        </div>
+                        <p><a href="${result.url}" target="_blank">点击打开预览页面</a></p>
+                    `;
+                } else {
+                    resultContainer.className = 'result-container result-error';
+                    document.getElementById('resultTitle').textContent = '❌ 错误';
+                    document.getElementById('resultMessage').textContent = result.error;
+                    document.getElementById('resultUrl').innerHTML = '';
+                }
+                
+            } catch (error) {
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+                resultContainer.style.display = 'block';
+                resultContainer.className = 'result-container result-error';
+                document.getElementById('resultTitle').textContent = '❌ 错误';
+                document.getElementById('resultMessage').textContent = '网络错误，请稍后重试';
+                document.getElementById('resultUrl').innerHTML = '';
+            }
+        });
+        
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(function() {
+                alert('链接已复制到剪贴板');
+            }).catch(function() {
+                // 降级方案
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('链接已复制到剪贴板');
+            });
+        }
+    </script>
+</body>
+</html> 
