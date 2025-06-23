@@ -1,6 +1,8 @@
 import os
 import secrets
-from flask import Flask, request, render_template, jsonify, send_from_directory
+import re
+import requests
+from flask import Flask, request, render_template, jsonify, send_from_directory, Response
 import bleach
 
 app = Flask(__name__)
@@ -12,6 +14,21 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 port = os.environ.get('PORT', DEFAULT_PORT)
 
+# 常见CDN域名列表
+CDN_DOMAINS = [
+    'cdn.tailwindcss.com',
+    'cdn.jsdelivr.net',
+    'unpkg.com',
+    'cdnjs.cloudflare.com',
+    'fonts.googleapis.com',
+    'fonts.gstatic.com',
+    'ajax.googleapis.com',
+    'code.jquery.com',
+    'stackpath.bootstrapcdn.com',
+    'maxcdn.bootstrapcdn.com',
+    'use.fontawesome.com'
+]
+
 def get_host_url():
     """获取主机URL，从环境变量读取，如果没有则使用默认值"""
     host_url = os.environ.get('HOST_URL', f'http://127.0.0.1:{port}')
@@ -22,6 +39,27 @@ def get_host_url():
 def generate_random_string(length=8):
     """生成随机字符串作为目录名"""
     return secrets.token_urlsafe(length)[:length]
+
+def replace_cdn_links(html_content):
+    """
+    替换HTML中的CDN链接为代理链接
+    """
+    host_url = get_host_url()
+    
+    # 匹配CDN链接的正则表达式
+    cdn_pattern = r'(https?://(?:' + '|'.join(re.escape(domain) for domain in CDN_DOMAINS) + r')[^\s"\'<>]*)'
+    
+    def replace_url(match):
+        original_url = match.group(1)
+        # 将URL编码后作为代理参数
+        import urllib.parse
+        encoded_url = urllib.parse.quote(original_url, safe='')
+        proxy_url = f"{host_url}/proxy?url={encoded_url}"
+        return proxy_url
+    
+    # 替换HTML中的CDN链接
+    modified_html = re.sub(cdn_pattern, replace_url, html_content)
+    return modified_html
 
 def sanitize_html(html_content):
     """
@@ -35,6 +73,54 @@ def sanitize_html(html_content):
 def index():
     """主页面 - 显示HTML输入表单"""
     return render_template('index.html')
+
+@app.route('/proxy')
+def proxy_resource():
+    """代理外部CDN资源"""
+    import urllib.parse
+    
+    # 获取要代理的URL
+    target_url = request.args.get('url')
+    if not target_url:
+        return jsonify({'error': '缺少URL参数'}), 400
+    
+    try:
+        # URL解码
+        decoded_url = urllib.parse.unquote(target_url)
+        
+        # 验证URL是否为允许的CDN域名
+        allowed = False
+        for domain in CDN_DOMAINS:
+            if domain in decoded_url:
+                allowed = True
+                break
+        
+        if not allowed:
+            return jsonify({'error': '不允许的域名'}), 403
+        
+        # 请求外部资源
+        response = requests.get(decoded_url, timeout=10)
+        response.raise_for_status()
+        
+        # 创建Flask响应
+        flask_response = Response(
+            response.content,
+            status=response.status_code,
+            headers={
+                'Content-Type': response.headers.get('Content-Type', 'text/plain'),
+                'Cache-Control': 'public, max-age=3600',  # 缓存1小时
+                'Access-Control-Allow-Origin': '*',  # 允许跨域
+            }
+        )
+        
+        return flask_response
+        
+    except requests.exceptions.Timeout:
+        return jsonify({'error': '请求超时'}), 504
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'请求失败: {str(e)}'}), 502
+    except Exception as e:
+        return jsonify({'error': f'代理失败: {str(e)}'}), 500
 
 @app.route('/upload', methods=['POST'])
 def upload_html():
@@ -52,9 +138,12 @@ def upload_html():
         # 创建目录
         os.makedirs(dir_path, exist_ok=True)
         
+        # 替换CDN链接为代理链接
+        html_with_proxy = replace_cdn_links(html_content)
+        
         # 暂不清理HTML（后续实现）
-        # cleaned_html = sanitize_html(html_content)
-        cleaned_html = html_content
+        # cleaned_html = sanitize_html(html_with_proxy)
+        cleaned_html = html_with_proxy
         
         # 保存为index.html
         file_path = os.path.join(dir_path, 'index.html')
@@ -68,7 +157,7 @@ def upload_html():
         return jsonify({
             'success': True,
             'url': access_url,
-            'message': 'HTML文件已成功保存'
+            'message': 'HTML文件已成功保存，CDN资源已自动代理'
         })
         
     except Exception as e:

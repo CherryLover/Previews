@@ -1,2 +1,3 @@
-Flask
-bleach 
+Flask==2.3.3
+bleach==6.0.0
+requests==2.31.0 
