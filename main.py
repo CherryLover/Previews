@@ -2,7 +2,10 @@ import os
 import secrets
 import re
 import requests
+import json
+import datetime
 from flask import Flask, request, render_template, jsonify, send_from_directory, Response
+from bs4 import BeautifulSoup
 import bleach
 
 app = Flask(__name__)
@@ -69,6 +72,134 @@ def sanitize_html(html_content):
     # TODO: 实现HTML清理逻辑
     return html_content
 
+def extract_html_metadata(html_content):
+    """
+    从HTML内容中提取元数据（标题、描述等）
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # 提取标题
+        title = None
+        if soup.title:
+            title = soup.title.string.strip()
+        elif soup.find('h1'):
+            title = soup.find('h1').get_text().strip()
+
+        # 提取描述
+        description = None
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc:
+            description = meta_desc.get('content', '').strip()
+        elif soup.find('p'):
+            # 取第一个段落作为描述，限制长度
+            first_p = soup.find('p').get_text().strip()
+            description = first_p[:100] + '...' if len(first_p) > 100 else first_p
+
+        return {
+            'title': title or '未命名项目',
+            'description': description or '暂无描述'
+        }
+    except Exception as e:
+        return {
+            'title': '未命名项目',
+            'description': '暂无描述'
+        }
+
+def save_project_metadata(project_id, metadata):
+    """
+    保存项目元数据到JSON文件
+    """
+    try:
+        metadata_file = os.path.join(app.config['UPLOAD_FOLDER'], project_id, 'metadata.json')
+        metadata['created_at'] = datetime.datetime.now().isoformat()
+        metadata['id'] = project_id
+
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"保存元数据失败: {e}")
+        return False
+
+def load_project_metadata(project_id):
+    """
+    加载项目元数据
+    """
+    try:
+        metadata_file = os.path.join(app.config['UPLOAD_FOLDER'], project_id, 'metadata.json')
+        if os.path.exists(metadata_file):
+            with open(metadata_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"加载元数据失败: {e}")
+
+    # 如果没有元数据文件，尝试从HTML中提取
+    try:
+        html_file = os.path.join(app.config['UPLOAD_FOLDER'], project_id, 'index.html')
+        if os.path.exists(html_file):
+            with open(html_file, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            metadata = extract_html_metadata(html_content)
+            metadata['id'] = project_id
+            metadata['created_at'] = datetime.datetime.fromtimestamp(
+                os.path.getctime(html_file)
+            ).isoformat()
+            return metadata
+    except Exception as e:
+        print(f"从HTML提取元数据失败: {e}")
+
+    return {
+        'id': project_id,
+        'title': '未命名项目',
+        'description': '暂无描述',
+        'created_at': datetime.datetime.now().isoformat()
+    }
+
+def get_all_projects():
+    """
+    获取所有已部署的项目列表
+    """
+    projects = []
+    try:
+        static_dir = app.config['UPLOAD_FOLDER']
+        if not os.path.exists(static_dir):
+            return projects
+
+        for item in os.listdir(static_dir):
+            item_path = os.path.join(static_dir, item)
+            if os.path.isdir(item_path):
+                index_file = os.path.join(item_path, 'index.html')
+                if os.path.exists(index_file):
+                    # 加载项目元数据
+                    metadata = load_project_metadata(item)
+
+                    # 获取文件信息
+                    file_stat = os.stat(index_file)
+                    file_size = file_stat.st_size
+
+                    # 生成访问URL
+                    host_url = get_host_url()
+                    access_url = f"{host_url}/static/{item}/index.html"
+
+                    project_info = {
+                        'id': item,
+                        'title': metadata.get('title', '未命名项目'),
+                        'description': metadata.get('description', '暂无描述'),
+                        'url': access_url,
+                        'created_at': metadata.get('created_at'),
+                        'file_size': f"{file_size / 1024:.1f}KB" if file_size < 1024*1024 else f"{file_size / (1024*1024):.1f}MB"
+                    }
+                    projects.append(project_info)
+
+        # 按创建时间倒序排列
+        projects.sort(key=lambda x: x['created_at'], reverse=True)
+
+    except Exception as e:
+        print(f"获取项目列表失败: {e}")
+
+    return projects
+
 @app.route('/')
 def index():
     """主页面 - 显示HTML输入表单"""
@@ -130,38 +261,58 @@ def upload_html():
         html_content = request.form.get('html_content', '')
         if not html_content.strip():
             return jsonify({'error': '请输入HTML内容'}), 400
-        
+
         # 生成随机目录名
         random_dir = generate_random_string()
         dir_path = os.path.join(app.config['UPLOAD_FOLDER'], random_dir)
-        
+
         # 创建目录
         os.makedirs(dir_path, exist_ok=True)
-        
+
         # 替换CDN链接为代理链接
         html_with_proxy = replace_cdn_links(html_content)
-        
+
         # 暂不清理HTML（后续实现）
         # cleaned_html = sanitize_html(html_with_proxy)
         cleaned_html = html_with_proxy
-        
+
         # 保存为index.html
         file_path = os.path.join(dir_path, 'index.html')
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(cleaned_html)
-        
+
+        # 提取并保存项目元数据
+        metadata = extract_html_metadata(html_content)
+        save_project_metadata(random_dir, metadata)
+
         # 生成访问URL
         host_url = get_host_url()
         access_url = f"{host_url}/static/{random_dir}/index.html"
-        
+
         return jsonify({
             'success': True,
             'url': access_url,
             'message': 'HTML文件已成功保存，CDN资源已自动代理'
         })
-        
+
     except Exception as e:
         return jsonify({'error': f'保存失败: {str(e)}'}), 500
+
+@app.route('/api/projects', methods=['GET'])
+def get_projects():
+    """获取所有已部署项目的API接口"""
+    try:
+        projects = get_all_projects()
+        return jsonify({
+            'success': True,
+            'projects': projects,
+            'total': len(projects)
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'获取项目列表失败: {str(e)}'
+        }), 500
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
