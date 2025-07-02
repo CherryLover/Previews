@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HTML 预览工具</title>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -75,23 +76,89 @@
 
         .project-thumbnail {
             width: 100%;
-            height: 150px;
+            height: 200px;
             background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
             border-radius: 8px;
             margin-bottom: 15px;
+            position: relative;
+            overflow: hidden;
             display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .project-thumbnail img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center top; /* 优先显示页面顶部内容 */
+            border-radius: 8px;
+            background-color: #ffffff; /* 防止透明背景 */
+        }
+
+        .project-thumbnail .thumbnail-placeholder {
+            display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
             color: #666;
             font-size: 0.9rem;
-            position: relative;
-            overflow: hidden;
         }
 
-        .project-thumbnail::before {
+        .project-thumbnail .thumbnail-placeholder::before {
             content: '🌐';
             font-size: 2rem;
             opacity: 0.5;
+            margin-bottom: 8px;
+        }
+
+        .project-thumbnail .thumbnail-loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-size: 0.85rem;
+        }
+
+        .project-thumbnail .thumbnail-loading .spinner-small {
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 8px;
+        }
+
+        .project-thumbnail iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            border-radius: 8px;
+            background: white;
+        }
+
+        .thumbnail-countdown {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .thumbnail-progress {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            height: 3px;
+            background: #667eea;
+            border-radius: 0 0 8px 8px;
+            transition: width 0.1s ease;
         }
 
         .project-title {
@@ -213,7 +280,7 @@
             }
 
             .project-thumbnail {
-                height: 120px;
+                height: 150px;
             }
 
             .project-actions {
@@ -484,8 +551,11 @@
 
             projectsGrid.innerHTML = projects.map(project => `
                 <div class="project-card">
-                    <div class="project-thumbnail">
-                        <span>网页预览</span>
+                    <div class="project-thumbnail" id="thumbnail-${project.id}">
+                        <div class="thumbnail-loading">
+                            <div class="spinner-small"></div>
+                            <span>检查缩略图...</span>
+                        </div>
                     </div>
                     <div class="project-title">${escapeHtml(project.title)}</div>
                     <div class="project-description">${escapeHtml(project.description)}</div>
@@ -502,6 +572,11 @@
                     </div>
                 </div>
             `).join('');
+
+            // 处理每个项目的缩略图
+            projects.forEach(project => {
+                handleProjectThumbnail(project);
+            });
         }
 
         // 显示空状态
@@ -562,55 +637,334 @@
             });
         }
 
+        // 处理项目缩略图
+        function handleProjectThumbnail(project) {
+            const thumbnailContainer = document.getElementById(`thumbnail-${project.id}`);
+            if (!thumbnailContainer) return;
+
+            // 首先尝试加载已有的缩略图
+            const img = new Image();
+
+            img.onload = function() {
+                // 缩略图存在且加载成功
+                thumbnailContainer.innerHTML = `<img src="${project.thumbnail}" alt="项目预览图">`;
+            };
+
+            img.onerror = function() {
+                // 缩略图不存在，启动iframe + 延迟截图策略
+                console.log(`项目 ${project.id} 缺少缩略图，启动iframe预览`);
+                startIframeThumbnailGeneration(project, thumbnailContainer);
+            };
+
+            // 开始检查缩略图
+            img.src = project.thumbnail + '?t=' + Date.now();
+        }
+
+        // 启动iframe缩略图生成流程
+        function startIframeThumbnailGeneration(project, thumbnailContainer) {
+            // 创建iframe显示实时内容
+            const iframe = document.createElement('iframe');
+            iframe.src = project.url;
+            iframe.style.width = '100%';
+            iframe.style.height = '100%';
+            iframe.style.border = 'none';
+            iframe.style.borderRadius = '8px';
+            iframe.style.backgroundColor = '#ffffff';
+
+            // 创建倒计时显示
+            const countdown = document.createElement('div');
+            countdown.className = 'thumbnail-countdown';
+            countdown.textContent = '10s';
+
+            // 创建进度条
+            const progress = document.createElement('div');
+            progress.className = 'thumbnail-progress';
+            progress.style.width = '0%';
+
+            // 清空容器并添加iframe和UI元素
+            thumbnailContainer.innerHTML = '';
+            thumbnailContainer.style.position = 'relative';
+            thumbnailContainer.appendChild(iframe);
+            thumbnailContainer.appendChild(countdown);
+            thumbnailContainer.appendChild(progress);
+
+            // 等待iframe加载完成
+            iframe.onload = function() {
+                console.log(`项目 ${project.id} iframe加载完成，开始倒计时`);
+                startCountdownAndScreenshot(project, thumbnailContainer, iframe, countdown, progress);
+            };
+
+            iframe.onerror = function() {
+                console.error(`项目 ${project.id} iframe加载失败`);
+                showThumbnailPlaceholder(thumbnailContainer);
+            };
+        }
+
+        // 开始倒计时和截图流程
+        function startCountdownAndScreenshot(project, thumbnailContainer, iframe, countdown, progress) {
+            let timeLeft = 10;
+
+            const countdownInterval = setInterval(() => {
+                timeLeft--;
+                countdown.textContent = `${timeLeft}s`;
+                progress.style.width = `${((10 - timeLeft) / 10) * 100}%`;
+
+                if (timeLeft <= 0) {
+                    clearInterval(countdownInterval);
+                    countdown.textContent = '截图中...';
+                    progress.style.width = '100%';
+
+                    // 开始截图
+                    captureIframeThumbnail(project, thumbnailContainer, iframe);
+                }
+            }, 1000);
+        }
+
+        // 检测页面实际内容边界
+        function getContentBounds(iframeDocument) {
+            const body = iframeDocument.body;
+            const html = iframeDocument.documentElement;
+
+            // 获取所有可见元素
+            const allElements = Array.from(body.querySelectorAll('*')).filter(el => {
+                const style = iframeDocument.defaultView.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            });
+
+            if (allElements.length === 0) {
+                return {
+                    width: Math.max(body.scrollWidth, body.clientWidth, 800),
+                    height: Math.max(body.scrollHeight, body.clientHeight, 600)
+                };
+            }
+
+            // 计算内容的实际边界
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+            allElements.forEach(el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    minX = Math.min(minX, rect.left);
+                    minY = Math.min(minY, rect.top);
+                    maxX = Math.max(maxX, rect.right);
+                    maxY = Math.max(maxY, rect.bottom);
+                }
+            });
+
+            // 如果没有找到有效内容，使用默认尺寸
+            if (minX === Infinity) {
+                return {
+                    width: Math.max(body.scrollWidth, body.clientWidth, 800),
+                    height: Math.max(body.scrollHeight, body.clientHeight, 600)
+                };
+            }
+
+            // 添加一些边距
+            const padding = 20;
+            return {
+                width: Math.max(maxX - minX + padding * 2, 400),
+                height: Math.max(maxY - minY + padding * 2, 300)
+            };
+        }
+
+        // 捕获iframe缩略图
+        async function captureIframeThumbnail(project, thumbnailContainer, iframe) {
+            try {
+                console.log(`开始为项目 ${project.id} 生成缩略图`);
+
+                // 获取iframe内容
+                const iframeDocument = iframe.contentDocument || iframe.contentWindow.document;
+                const iframeBody = iframeDocument.body;
+
+                if (!iframeBody) {
+                    throw new Error('无法访问iframe内容');
+                }
+
+                // 使用智能内容检测获取实际内容边界
+                const contentBounds = getContentBounds(iframeDocument);
+
+                // 计算合适的截图尺寸，保持4:3比例（更适合缩略图显示）
+                let captureWidth = Math.min(contentBounds.width, 1200); // 最大宽度1200px
+                let captureHeight = Math.min(contentBounds.height, Math.floor(captureWidth * 3 / 4)); // 保持4:3比例
+
+                // 确保最小尺寸
+                captureWidth = Math.max(captureWidth, 400);
+                captureHeight = Math.max(captureHeight, 300);
+
+                // 如果内容高度不足，调整宽度以保持比例
+                if (contentBounds.height < captureHeight) {
+                    captureHeight = contentBounds.height;
+                    captureWidth = Math.max(Math.floor(captureHeight * 4 / 3), 400);
+                }
+
+                console.log(`内容边界: ${contentBounds.width}x${contentBounds.height}, 截图尺寸: ${captureWidth}x${captureHeight}`);
+
+                // 使用html2canvas生成截图
+                const canvas = await html2canvas(iframeBody, {
+                    width: captureWidth,
+                    height: captureHeight,
+                    scale: 400 / captureWidth, // 动态计算缩放比例，生成400px宽的缩略图
+                    useCORS: true,
+                    allowTaint: true,
+                    backgroundColor: '#ffffff',
+                    logging: false,
+                    timeout: 8000,
+                    scrollX: 0,
+                    scrollY: 0,
+                    windowWidth: captureWidth,
+                    windowHeight: captureHeight
+                });
+
+                // 转换为base64（使用JPEG格式减小文件大小）
+                const base64Data = canvas.toDataURL('image/jpeg', 0.85);
+
+                // 上传截图
+                const uploadResult = await uploadScreenshot(project.id, base64Data);
+
+                if (uploadResult.success) {
+                    console.log(`项目 ${project.id} 缩略图生成成功，尺寸: ${canvas.width}x${canvas.height}`);
+
+                    // 创建优化的图片元素
+                    const img = document.createElement('img');
+                    img.src = `${uploadResult.thumbnail_url}?t=${Date.now()}`;
+                    img.alt = "项目预览图";
+                    img.style.width = '100%';
+                    img.style.height = '100%';
+                    img.style.objectFit = 'cover';
+                    img.style.objectPosition = 'center top';
+
+                    // 添加加载事件处理
+                    img.onload = function() {
+                        console.log(`项目 ${project.id} 缩略图显示成功`);
+                    };
+
+                    img.onerror = function() {
+                        console.error(`项目 ${project.id} 缩略图加载失败`);
+                        thumbnailContainer.innerHTML = `
+                            <div class="thumbnail-placeholder">
+                                <div class="placeholder-icon">🖼️</div>
+                                <div class="placeholder-text">缩略图加载失败</div>
+                            </div>
+                        `;
+                    };
+
+                    // 替换iframe为缩略图
+                    thumbnailContainer.innerHTML = '';
+                    thumbnailContainer.appendChild(img);
+                } else {
+                    console.warn(`项目 ${project.id} 缩略图上传失败:`, uploadResult.error);
+                    // 保留iframe作为降级方案，但移除倒计时UI
+                    const countdownEl = thumbnailContainer.querySelector('.thumbnail-countdown');
+                    const progressEl = thumbnailContainer.querySelector('.thumbnail-progress');
+                    if (countdownEl) countdownEl.remove();
+                    if (progressEl) progressEl.remove();
+                }
+
+            } catch (error) {
+                console.error(`项目 ${project.id} 截图失败:`, error);
+                // 保留iframe作为降级方案，但移除倒计时UI
+                const countdownEl = thumbnailContainer.querySelector('.thumbnail-countdown');
+                const progressEl = thumbnailContainer.querySelector('.thumbnail-progress');
+                if (countdownEl) countdownEl.remove();
+                if (progressEl) progressEl.remove();
+            }
+        }
+
+        // 显示预览图占位符
+        function showThumbnailPlaceholder(thumbnailContainer) {
+            thumbnailContainer.innerHTML = `
+                <div class="thumbnail-placeholder">
+                    <span>网页预览</span>
+                </div>
+            `;
+        }
+
+
+
+
+
+        // 上传截图到服务器
+        async function uploadScreenshot(projectId, base64Data) {
+            try {
+                const response = await fetch(`/api/projects/${projectId}/upload-thumbnail`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        thumbnail: base64Data
+                    })
+                });
+
+                const result = await response.json();
+                return result;
+
+            } catch (error) {
+                console.error('上传截图失败:', error);
+                return { success: false, error: error.message };
+            }
+        }
+
         document.getElementById('htmlForm').addEventListener('submit', async function(e) {
             e.preventDefault();
-            
+
             const submitBtn = document.getElementById('submitBtn');
             const loading = document.getElementById('loading');
             const actionButtons = document.getElementById('actionButtons');
             const htmlContent = document.getElementById('htmlContent').value;
-            
+
             if (!htmlContent.trim()) {
                 alert('请输入HTML内容');
                 return;
             }
-            
+
             // 显示加载状态
             submitBtn.disabled = true;
             loading.style.display = 'block';
-            
+            updateLoadingMessage('正在生成预览链接...');
+
             try {
                 const formData = new FormData();
                 formData.append('html_content', htmlContent);
-                
+
                 const response = await fetch('/upload', {
                     method: 'POST',
                     body: formData
                 });
-                
+
                 const result = await response.json();
-                
+
                 // 隐藏加载状态
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
-                
+
                 if (result.success) {
                     currentUrl = result.url;
+
                     // 隐藏生成按钮，显示操作按钮
                     submitBtn.style.display = 'none';
                     actionButtons.style.display = 'inline-block';
+
                     // 重新加载项目列表
                     loadProjects();
                 } else {
                     alert('错误: ' + result.error);
                 }
-                
+
             } catch (error) {
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
                 alert('网络错误，请稍后重试');
             }
         });
+
+        // 更新加载消息
+        function updateLoadingMessage(message) {
+            const loadingText = document.querySelector('#loading p');
+            if (loadingText) {
+                loadingText.textContent = message;
+            }
+        }
         
         function openPreview() {
             if (currentUrl) {

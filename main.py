@@ -4,6 +4,7 @@ import re
 import requests
 import json
 import datetime
+import base64
 from flask import Flask, request, render_template, jsonify, send_from_directory, Response
 from bs4 import BeautifulSoup
 import bleach
@@ -156,6 +157,35 @@ def load_project_metadata(project_id):
         'created_at': datetime.datetime.now().isoformat()
     }
 
+def save_thumbnail_from_base64(project_id, base64_data):
+    """
+    从base64数据保存缩略图
+    """
+    try:
+        # 移除data:image/png;base64,前缀
+        if base64_data.startswith('data:image/'):
+            base64_data = base64_data.split(',')[1]
+
+        # 解码base64数据
+        image_data = base64.b64decode(base64_data)
+
+        # 保存到文件
+        thumbnail_path = os.path.join(app.config['UPLOAD_FOLDER'], project_id, 'thumbnail.png')
+        with open(thumbnail_path, 'wb') as f:
+            f.write(image_data)
+
+        return True
+    except Exception as e:
+        print(f"保存缩略图失败: {e}")
+        return False
+
+def has_thumbnail(project_id):
+    """
+    检查项目是否有缩略图
+    """
+    thumbnail_path = os.path.join(app.config['UPLOAD_FOLDER'], project_id, 'thumbnail.png')
+    return os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0
+
 def get_all_projects():
     """
     获取所有已部署的项目列表
@@ -182,11 +212,15 @@ def get_all_projects():
                     host_url = get_host_url()
                     access_url = f"{host_url}/static/{item}/index.html"
 
+                    # 生成预览图URL
+                    thumbnail_url = f"{host_url}/static/{item}/thumbnail.png"
+
                     project_info = {
                         'id': item,
                         'title': metadata.get('title', '未命名项目'),
                         'description': metadata.get('description', '暂无描述'),
                         'url': access_url,
+                        'thumbnail': thumbnail_url,
                         'created_at': metadata.get('created_at'),
                         'file_size': f"{file_size / 1024:.1f}KB" if file_size < 1024*1024 else f"{file_size / (1024*1024):.1f}MB"
                     }
@@ -292,6 +326,7 @@ def upload_html():
         return jsonify({
             'success': True,
             'url': access_url,
+            'project_id': random_dir,
             'message': 'HTML文件已成功保存，CDN资源已自动代理'
         })
 
@@ -312,6 +347,49 @@ def get_projects():
         return jsonify({
             'success': False,
             'error': f'获取项目列表失败: {str(e)}'
+        }), 500
+
+@app.route('/api/projects/<project_id>/upload-thumbnail', methods=['POST'])
+def upload_thumbnail(project_id):
+    """上传项目缩略图"""
+    try:
+        # 检查项目是否存在
+        project_path = os.path.join(app.config['UPLOAD_FOLDER'], project_id)
+        if not os.path.exists(project_path) or not os.path.isdir(project_path):
+            return jsonify({
+                'success': False,
+                'error': '项目不存在'
+            }), 404
+
+        # 获取base64图片数据
+        data = request.get_json()
+        if not data or 'thumbnail' not in data:
+            return jsonify({
+                'success': False,
+                'error': '缺少缩略图数据'
+            }), 400
+
+        # 保存缩略图
+        success = save_thumbnail_from_base64(project_id, data['thumbnail'])
+
+        if success:
+            host_url = get_host_url()
+            thumbnail_url = f"{host_url}/static/{project_id}/thumbnail.png"
+            return jsonify({
+                'success': True,
+                'thumbnail_url': thumbnail_url,
+                'message': '缩略图上传成功'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': '缩略图保存失败'
+            }), 500
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'上传缩略图失败: {str(e)}'
         }), 500
 
 @app.route('/static/<path:filename>')
