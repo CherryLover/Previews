@@ -527,13 +527,39 @@ def upload_html():
 @app.route('/api/projects', methods=['GET'])
 @csrf.exempt  # GET请求,只读操作,可以豁免CSRF
 def get_projects():
-    """获取所有已部署项目的API接口"""
+    """获取已部署项目的API接口，支持分页"""
     try:
-        projects = get_all_projects()
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # 限制每页数量范围
+        per_page = max(1, min(per_page, 100))  # 1-100之间
+        page = max(1, page)  # 至少为1
+
+        # 获取所有项目
+        all_projects = get_all_projects()
+        total = len(all_projects)
+
+        # 计算分页
+        start = (page - 1) * per_page
+        end = start + per_page
+        projects = all_projects[start:end]
+
+        # 计算总页数
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 0
+
         return jsonify({
             'success': True,
             'projects': projects,
-            'total': len(projects)
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'total_pages': total_pages,
+                'has_next': page < total_pages,
+                'has_prev': page > 1
+            }
         })
     except Exception as e:
         logger.error(f"获取项目列表失败: {e}")
