@@ -8,6 +8,8 @@ import base64
 import logging
 import time
 import shutil
+import hashlib
+from collections import OrderedDict
 from flask import Flask, request, render_template, jsonify, send_from_directory, Response, make_response
 from bs4 import BeautifulSoup
 import bleach
@@ -63,6 +65,14 @@ PROJECTS_CACHE = {
     'ttl': 300  # 缓存有效期(秒),默认5分钟
 }
 
+# CDN 缓存配置
+CDN_CACHE_DIR = os.path.join(UPLOAD_FOLDER, 'cdn_cache')
+CDN_CACHE_TTL = int(os.environ.get('CDN_CACHE_TTL', 7 * 24 * 3600))  # 默认7天
+CDN_CACHE_MAX_MEMORY_ITEMS = int(os.environ.get('CDN_CACHE_MAX_MEMORY_ITEMS', 100))  # 内存缓存最大条目数
+
+# 内存缓存 - 使用 OrderedDict 实现简单的 LRU
+cdn_memory_cache = OrderedDict()
+
 # 常见CDN域名列表
 CDN_DOMAINS = [
     'cdn.tailwindcss.com',
@@ -88,6 +98,110 @@ def get_host_url():
 def generate_random_string(length=8):
     """生成随机字符串作为目录名"""
     return secrets.token_urlsafe(length)[:length]
+
+def get_url_hash(url):
+    """
+    生成 URL 的哈希值作为缓存文件名
+    使用 SHA256 保证唯一性和安全性
+    """
+    return hashlib.sha256(url.encode('utf-8')).hexdigest()
+
+def get_cdn_cache_path(url_hash, content_type):
+    """
+    获取 CDN 缓存文件路径
+    根据 Content-Type 确定文件扩展名
+    """
+    # 根据 Content-Type 确定扩展名
+    ext_map = {
+        'text/css': '.css',
+        'text/javascript': '.js',
+        'application/javascript': '.js',
+        'image/png': '.png',
+        'image/jpeg': '.jpg',
+        'image/svg+xml': '.svg',
+        'image/webp': '.webp',
+        'font/woff': '.woff',
+        'font/woff2': '.woff2',
+        'font/ttf': '.ttf',
+        'font/otf': '.otf',
+    }
+
+    ext = ext_map.get(content_type, '.bin')
+    return os.path.join(CDN_CACHE_DIR, f"{url_hash}{ext}")
+
+def get_cdn_from_memory_cache(url_hash):
+    """
+    从内存缓存中获取 CDN 资源
+    返回 (content, content_type, timestamp) 或 None
+    """
+    if url_hash in cdn_memory_cache:
+        # LRU: 移动到末尾表示最近使用
+        cdn_memory_cache.move_to_end(url_hash)
+        return cdn_memory_cache[url_hash]
+    return None
+
+def set_cdn_to_memory_cache(url_hash, content, content_type):
+    """
+    将 CDN 资源存储到内存缓存
+    使用 LRU 策略，超过最大条目数时删除最旧的
+    """
+    if url_hash in cdn_memory_cache:
+        cdn_memory_cache.move_to_end(url_hash)
+    else:
+        cdn_memory_cache[url_hash] = (content, content_type, time.time())
+        # LRU: 如果超过最大条目数，删除最旧的（第一个）
+        if len(cdn_memory_cache) > CDN_CACHE_MAX_MEMORY_ITEMS:
+            cdn_memory_cache.popitem(last=False)
+
+def get_cdn_from_file_cache(url_hash, content_type):
+    """
+    从文件系统缓存中获取 CDN 资源
+    返回 (content, content_type) 或 None
+    """
+    try:
+        cache_path = get_cdn_cache_path(url_hash, content_type)
+
+        if not os.path.exists(cache_path):
+            return None
+
+        # 检查缓存是否过期
+        file_mtime = os.path.getmtime(cache_path)
+        if time.time() - file_mtime > CDN_CACHE_TTL:
+            # 缓存已过期，删除文件
+            os.remove(cache_path)
+            logger.info(f"CDN 缓存已过期并删除: {cache_path}")
+            return None
+
+        # 读取缓存文件
+        with open(cache_path, 'rb') as f:
+            content = f.read()
+
+        return (content, content_type)
+
+    except Exception as e:
+        logger.error(f"读取 CDN 文件缓存失败: {e}")
+        return None
+
+def set_cdn_to_file_cache(url_hash, content, content_type):
+    """
+    将 CDN 资源存储到文件系统缓存
+    """
+    try:
+        # 确保缓存目录存在
+        os.makedirs(CDN_CACHE_DIR, exist_ok=True)
+
+        cache_path = get_cdn_cache_path(url_hash, content_type)
+
+        # 写入缓存文件
+        with open(cache_path, 'wb') as f:
+            f.write(content)
+
+        logger.info(f"CDN 资源已缓存到文件: {cache_path} ({len(content)} bytes)")
+        return True
+
+    except Exception as e:
+        logger.error(f"写入 CDN 文件缓存失败: {e}")
+        return False
 
 def get_directory_size(path):
     """
@@ -424,7 +538,7 @@ def get_csrf_token():
 @limiter.limit("100 per hour")  # CDN 代理速率限制
 @csrf.exempt  # GET请求且用于资源代理,可以豁免CSRF
 def proxy_resource():
-    """代理外部CDN资源"""
+    """代理外部CDN资源（带两层缓存：内存 + 文件系统）"""
     import urllib.parse
 
     # 获取要代理的URL
@@ -446,9 +560,49 @@ def proxy_resource():
         if not allowed:
             return jsonify({'error': '不允许的域名'}), 403
 
-        # 请求外部资源,使用流式传输以检查大小
+        # 生成 URL 哈希
+        url_hash = get_url_hash(decoded_url)
+
+        # 1. 尝试从内存缓存获取
+        memory_cached = get_cdn_from_memory_cache(url_hash)
+        if memory_cached:
+            content, content_type, _ = memory_cached
+            logger.info(f"CDN 缓存命中（内存）: {decoded_url}")
+            return Response(
+                content,
+                headers={
+                    'Content-Type': content_type,
+                    'Cache-Control': 'public, max-age=86400',  # 客户端缓存1天
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Cache-Status': 'HIT-MEMORY',
+                }
+            )
+
+        # 2. 请求外部资源获取 content_type
         response = requests.get(decoded_url, timeout=10, stream=True)
         response.raise_for_status()
+
+        content_type = response.headers.get('Content-Type', 'text/plain')
+
+        # 3. 尝试从文件缓存获取
+        file_cached = get_cdn_from_file_cache(url_hash, content_type)
+        if file_cached:
+            content, _ = file_cached
+            logger.info(f"CDN 缓存命中（文件）: {decoded_url}")
+            # 同时写入内存缓存
+            set_cdn_to_memory_cache(url_hash, content, content_type)
+            return Response(
+                content,
+                headers={
+                    'Content-Type': content_type,
+                    'Cache-Control': 'public, max-age=86400',
+                    'Access-Control-Allow-Origin': '*',
+                    'X-Cache-Status': 'HIT-DISK',
+                }
+            )
+
+        # 4. 缓存未命中，从外部获取资源
+        logger.info(f"CDN 缓存未命中，从外部获取: {decoded_url}")
 
         # 检查响应大小
         content_length = response.headers.get('Content-Length')
@@ -462,14 +616,19 @@ def proxy_resource():
             if len(content) > MAX_PROXY_SIZE:
                 return jsonify({'error': '文件过大,超过10MB限制'}), 413
 
-        # 创建Flask响应
+        # 5. 存储到缓存
+        set_cdn_to_memory_cache(url_hash, content, content_type)
+        set_cdn_to_file_cache(url_hash, content, content_type)
+
+        # 6. 返回响应
         flask_response = Response(
             content,
             status=response.status_code,
             headers={
-                'Content-Type': response.headers.get('Content-Type', 'text/plain'),
-                'Cache-Control': 'public, max-age=3600',  # 缓存1小时
-                'Access-Control-Allow-Origin': '*',  # 允许跨域
+                'Content-Type': content_type,
+                'Cache-Control': 'public, max-age=86400',
+                'Access-Control-Allow-Origin': '*',
+                'X-Cache-Status': 'MISS',
             }
         )
 
@@ -863,6 +1022,102 @@ def serve_static(filename):
     response.headers['X-Content-Type-Options'] = 'nosniff'
 
     return response
+
+# CDN 缓存管理 API
+@app.route('/api/cdn-cache/stats', methods=['GET'])
+@csrf.exempt  # GET 请求，可以豁免 CSRF
+@limiter.limit("30 per hour")
+def get_cdn_cache_stats():
+    """获取 CDN 缓存统计信息"""
+    try:
+        # 统计内存缓存
+        memory_items = len(cdn_memory_cache)
+        memory_size = sum(len(item[0]) for item in cdn_memory_cache.values())
+
+        # 统计文件缓存
+        file_items = 0
+        file_size = 0
+        if os.path.exists(CDN_CACHE_DIR):
+            for filename in os.listdir(CDN_CACHE_DIR):
+                file_path = os.path.join(CDN_CACHE_DIR, filename)
+                if os.path.isfile(file_path):
+                    file_items += 1
+                    file_size += os.path.getsize(file_path)
+
+        return jsonify({
+            'memory_cache': {
+                'items': memory_items,
+                'size_bytes': memory_size,
+                'size_mb': round(memory_size / (1024 * 1024), 2),
+                'max_items': CDN_CACHE_MAX_MEMORY_ITEMS,
+            },
+            'file_cache': {
+                'items': file_items,
+                'size_bytes': file_size,
+                'size_mb': round(file_size / (1024 * 1024), 2),
+                'ttl_days': CDN_CACHE_TTL / (24 * 3600),
+            },
+            'total': {
+                'items': memory_items + file_items,
+                'size_bytes': memory_size + file_size,
+                'size_mb': round((memory_size + file_size) / (1024 * 1024), 2),
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取 CDN 缓存统计失败: {e}")
+        return jsonify({'error': '获取统计信息失败'}), 500
+
+@app.route('/api/cdn-cache/clear', methods=['POST'])
+@limiter.limit("5 per hour")
+def clear_cdn_cache():
+    """清空 CDN 缓存"""
+    try:
+        # 清空内存缓存
+        cdn_memory_cache.clear()
+        logger.info("内存缓存已清空")
+
+        # 清空文件缓存
+        deleted_files = 0
+        if os.path.exists(CDN_CACHE_DIR):
+            for filename in os.listdir(CDN_CACHE_DIR):
+                file_path = os.path.join(CDN_CACHE_DIR, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    deleted_files += 1
+            logger.info(f"文件缓存已清空，删除了 {deleted_files} 个文件")
+
+        return jsonify({
+            'success': True,
+            'message': f'缓存已清空，删除了 {deleted_files} 个文件'
+        })
+    except Exception as e:
+        logger.error(f"清空 CDN 缓存失败: {e}")
+        return jsonify({'error': '清空缓存失败'}), 500
+
+@app.route('/api/cdn-cache/cleanup', methods=['POST'])
+@limiter.limit("5 per hour")
+def cleanup_expired_cdn_cache():
+    """清理过期的 CDN 缓存文件"""
+    try:
+        deleted_files = 0
+        if os.path.exists(CDN_CACHE_DIR):
+            current_time = time.time()
+            for filename in os.listdir(CDN_CACHE_DIR):
+                file_path = os.path.join(CDN_CACHE_DIR, filename)
+                if os.path.isfile(file_path):
+                    file_mtime = os.path.getmtime(file_path)
+                    if current_time - file_mtime > CDN_CACHE_TTL:
+                        os.remove(file_path)
+                        deleted_files += 1
+                        logger.info(f"删除过期缓存文件: {filename}")
+
+        return jsonify({
+            'success': True,
+            'message': f'清理完成，删除了 {deleted_files} 个过期文件'
+        })
+    except Exception as e:
+        logger.error(f"清理过期 CDN 缓存失败: {e}")
+        return jsonify({'error': '清理过期缓存失败'}), 500
 
 # 错误处理器
 @app.errorhandler(413)
