@@ -8,13 +8,26 @@ import base64
 from flask import Flask, request, render_template, jsonify, send_from_directory, Response, make_response
 from bs4 import BeautifulSoup
 import bleach
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__, static_folder=None)  # 禁用默认静态文件夹,使用自定义路由
+
+# 配置速率限制
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
 
 # 配置
 UPLOAD_FOLDER = 'static'
 DEFAULT_PORT = 5010
+MAX_CONTENT_LENGTH = 1 * 1024 * 1024  # 1MB
+MAX_PROXY_SIZE = 10 * 1024 * 1024  # 10MB
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 port = os.environ.get('PORT', DEFAULT_PORT)
 
@@ -309,36 +322,49 @@ def index():
     return render_template('index.html')
 
 @app.route('/proxy')
+@limiter.limit("100 per hour")  # CDN 代理速率限制
 def proxy_resource():
     """代理外部CDN资源"""
     import urllib.parse
-    
+
     # 获取要代理的URL
     target_url = request.args.get('url')
     if not target_url:
         return jsonify({'error': '缺少URL参数'}), 400
-    
+
     try:
         # URL解码
         decoded_url = urllib.parse.unquote(target_url)
-        
+
         # 验证URL是否为允许的CDN域名
         allowed = False
         for domain in CDN_DOMAINS:
             if domain in decoded_url:
                 allowed = True
                 break
-        
+
         if not allowed:
             return jsonify({'error': '不允许的域名'}), 403
-        
-        # 请求外部资源
-        response = requests.get(decoded_url, timeout=10)
+
+        # 请求外部资源,使用流式传输以检查大小
+        response = requests.get(decoded_url, timeout=10, stream=True)
         response.raise_for_status()
-        
+
+        # 检查响应大小
+        content_length = response.headers.get('Content-Length')
+        if content_length and int(content_length) > MAX_PROXY_SIZE:
+            return jsonify({'error': '文件过大,超过10MB限制'}), 413
+
+        # 读取内容,限制大小
+        content = b''
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if len(content) > MAX_PROXY_SIZE:
+                return jsonify({'error': '文件过大,超过10MB限制'}), 413
+
         # 创建Flask响应
         flask_response = Response(
-            response.content,
+            content,
             status=response.status_code,
             headers={
                 'Content-Type': response.headers.get('Content-Type', 'text/plain'),
@@ -346,17 +372,18 @@ def proxy_resource():
                 'Access-Control-Allow-Origin': '*',  # 允许跨域
             }
         )
-        
+
         return flask_response
-        
+
     except requests.exceptions.Timeout:
         return jsonify({'error': '请求超时'}), 504
     except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'请求失败: {str(e)}'}), 502
+        return jsonify({'error': '请求失败'}), 502
     except Exception as e:
-        return jsonify({'error': f'代理失败: {str(e)}'}), 500
+        return jsonify({'error': '代理失败'}), 500
 
 @app.route('/upload', methods=['POST'])
+@limiter.limit("10 per hour")  # 上传速率限制
 def upload_html():
     """处理HTML上传请求"""
     try:
@@ -364,6 +391,11 @@ def upload_html():
         html_content = request.form.get('html_content', '')
         if not html_content.strip():
             return jsonify({'error': '请输入HTML内容'}), 400
+
+        # 检查内容大小 (双重检查,虽然Flask的MAX_CONTENT_LENGTH也会检查)
+        content_size = len(html_content.encode('utf-8'))
+        if content_size > MAX_CONTENT_LENGTH:
+            return jsonify({'error': f'HTML内容过大,最大允许{MAX_CONTENT_LENGTH / (1024*1024):.1f}MB'}), 413
 
         # 生成随机目录名
         random_dir = generate_random_string()
@@ -405,7 +437,11 @@ def upload_html():
         })
 
     except Exception as e:
-        return jsonify({'error': f'保存失败: {str(e)}'}), 500
+        # 检查是否是413错误 (请求体过大)
+        error_msg = str(e)
+        if '413' in error_msg or 'Request Entity Too Large' in error_msg:
+            return jsonify({'error': f'请求内容过大,最大允许{MAX_CONTENT_LENGTH / (1024*1024):.1f}MB'}), 413
+        return jsonify({'error': '保存失败,请稍后重试'}), 500
 
 @app.route('/api/projects', methods=['GET'])
 def get_projects():
@@ -500,7 +536,24 @@ def serve_static(filename):
 
     return response
 
+# 错误处理器
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    """处理请求体过大的错误"""
+    return jsonify({
+        'error': f'请求内容过大,最大允许{MAX_CONTENT_LENGTH / (1024*1024):.1f}MB'
+    }), 413
+
+@app.errorhandler(429)
+def ratelimit_handler(error):
+    """处理速率限制错误"""
+    return jsonify({
+        'error': '请求过于频繁,请稍后再试'
+    }), 429
+
 if __name__ == '__main__':
     # 确保static目录存在
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    app.run(debug=True, port=port, host='0.0.0.0') 
+    # 从环境变量读取调试模式设置,生产环境应设置 DEBUG=False
+    debug_mode = os.environ.get('DEBUG', 'False').lower() == 'true'
+    app.run(debug=debug_mode, port=port, host='0.0.0.0') 
