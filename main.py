@@ -26,6 +26,7 @@ UPLOAD_FOLDER = 'static'
 DEFAULT_PORT = 5010
 MAX_CONTENT_LENGTH = 1 * 1024 * 1024  # 1MB
 MAX_PROXY_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_STORAGE_QUOTA = 500 * 1024 * 1024  # 500MB 总存储配额
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
@@ -56,6 +57,41 @@ def get_host_url():
 def generate_random_string(length=8):
     """生成随机字符串作为目录名"""
     return secrets.token_urlsafe(length)[:length]
+
+def get_directory_size(path):
+    """
+    计算目录的总大小（包括所有子文件和子目录）
+    返回字节数
+    """
+    total_size = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                file_path = os.path.join(dirpath, filename)
+                # 跳过符号链接
+                if not os.path.islink(file_path):
+                    total_size += os.path.getsize(file_path)
+    except Exception as e:
+        print(f"计算目录大小失败: {e}")
+    return total_size
+
+def check_storage_quota():
+    """
+    检查当前存储使用情况是否超过配额
+    返回 (is_within_quota, current_size, quota)
+    """
+    try:
+        static_dir = app.config['UPLOAD_FOLDER']
+        if not os.path.exists(static_dir):
+            return True, 0, MAX_STORAGE_QUOTA
+
+        current_size = get_directory_size(static_dir)
+        is_within_quota = current_size < MAX_STORAGE_QUOTA
+        return is_within_quota, current_size, MAX_STORAGE_QUOTA
+    except Exception as e:
+        print(f"检查存储配额失败: {e}")
+        # 出错时保守策略：允许上传
+        return True, 0, MAX_STORAGE_QUOTA
 
 def replace_cdn_links(html_content):
     """
@@ -387,6 +423,13 @@ def proxy_resource():
 def upload_html():
     """处理HTML上传请求"""
     try:
+        # 检查存储配额
+        is_within_quota, current_size, quota = check_storage_quota()
+        if not is_within_quota:
+            return jsonify({
+                'error': f'存储空间已满，当前使用: {current_size / (1024*1024):.1f}MB / {quota / (1024*1024):.1f}MB'
+            }), 507  # 507 Insufficient Storage
+
         # 获取HTML内容
         html_content = request.form.get('html_content', '')
         if not html_content.strip():
@@ -457,6 +500,38 @@ def get_projects():
         return jsonify({
             'success': False,
             'error': f'获取项目列表失败: {str(e)}'
+        }), 500
+
+@app.route('/api/storage/stats', methods=['GET'])
+def get_storage_stats():
+    """获取存储使用统计信息"""
+    try:
+        is_within_quota, current_size, quota = check_storage_quota()
+
+        # 计算项目数量
+        projects = get_all_projects()
+        project_count = len(projects)
+
+        return jsonify({
+            'success': True,
+            'storage': {
+                'used': current_size,
+                'used_mb': round(current_size / (1024*1024), 2),
+                'quota': quota,
+                'quota_mb': round(quota / (1024*1024), 2),
+                'usage_percentage': round((current_size / quota) * 100, 2) if quota > 0 else 0,
+                'available': quota - current_size,
+                'available_mb': round((quota - current_size) / (1024*1024), 2),
+                'is_within_quota': is_within_quota
+            },
+            'projects': {
+                'total': project_count
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'获取存储统计失败: {str(e)}'
         }), 500
 
 @app.route('/api/projects/<project_id>/upload-thumbnail', methods=['POST'])
