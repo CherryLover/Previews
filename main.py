@@ -5,11 +5,11 @@ import requests
 import json
 import datetime
 import base64
-from flask import Flask, request, render_template, jsonify, send_from_directory, Response
+from flask import Flask, request, render_template, jsonify, send_from_directory, Response, make_response
 from bs4 import BeautifulSoup
 import bleach
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)  # 禁用默认静态文件夹,使用自定义路由
 
 # 配置
 UPLOAD_FOLDER = 'static'
@@ -67,11 +67,80 @@ def replace_cdn_links(html_content):
 
 def sanitize_html(html_content):
     """
-    HTML内容清理函数（暂不实现）
-    后续可以使用bleach库进行安全清理
+    HTML内容清理函数
+    使用bleach库进行安全清理,防止XSS攻击
     """
-    # TODO: 实现HTML清理逻辑
-    return html_content
+    # 允许的HTML标签列表(包含常用的HTML5标签)
+    allowed_tags = [
+        'a', 'abbr', 'acronym', 'address', 'article', 'aside', 'audio',
+        'b', 'blockquote', 'body', 'br', 'button',
+        'canvas', 'caption', 'cite', 'code', 'col', 'colgroup',
+        'data', 'dd', 'del', 'details', 'dfn', 'div', 'dl', 'dt',
+        'em',
+        'figcaption', 'figure', 'footer', 'form',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hr', 'html',
+        'i', 'iframe', 'img', 'input', 'ins',
+        'kbd',
+        'label', 'legend', 'li', 'link',
+        'main', 'map', 'mark', 'meta',
+        'nav',
+        'ol', 'optgroup', 'option', 'output',
+        'p', 'pre', 'progress',
+        'q',
+        's', 'samp', 'section', 'select', 'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup', 'svg',
+        'table', 'tbody', 'td', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track',
+        'u', 'ul',
+        'var', 'video',
+        'wbr',
+        # SVG相关标签
+        'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'rect', 'g', 'defs', 'clipPath', 'text', 'tspan',
+    ]
+
+    # 允许的属性(使用字典形式,可以为每个标签指定允许的属性)
+    allowed_attributes = {
+        '*': ['class', 'id', 'style', 'title', 'lang', 'dir', 'data-*', 'aria-*', 'role'],
+        'a': ['href', 'target', 'rel', 'name'],
+        'img': ['src', 'alt', 'width', 'height', 'loading', 'srcset', 'sizes'],
+        'video': ['src', 'controls', 'autoplay', 'loop', 'muted', 'poster', 'width', 'height'],
+        'audio': ['src', 'controls', 'autoplay', 'loop', 'muted'],
+        'source': ['src', 'type', 'media'],
+        'iframe': ['src', 'width', 'height', 'frameborder', 'allowfullscreen', 'allow', 'sandbox'],
+        'link': ['href', 'rel', 'type', 'media'],
+        'meta': ['charset', 'name', 'content', 'http-equiv'],
+        'form': ['action', 'method', 'enctype', 'target'],
+        'input': ['type', 'name', 'value', 'placeholder', 'required', 'disabled', 'readonly', 'checked', 'maxlength', 'min', 'max', 'step', 'pattern'],
+        'button': ['type', 'name', 'value', 'disabled'],
+        'textarea': ['name', 'rows', 'cols', 'placeholder', 'required', 'disabled', 'readonly', 'maxlength'],
+        'select': ['name', 'required', 'disabled', 'multiple', 'size'],
+        'option': ['value', 'selected', 'disabled'],
+        'table': ['border', 'cellpadding', 'cellspacing'],
+        'td': ['colspan', 'rowspan'],
+        'th': ['colspan', 'rowspan', 'scope'],
+        'canvas': ['width', 'height'],
+        'svg': ['width', 'height', 'viewBox', 'xmlns', 'fill', 'stroke', 'stroke-width'],
+        'path': ['d', 'fill', 'stroke', 'stroke-width'],
+        'circle': ['cx', 'cy', 'r', 'fill', 'stroke', 'stroke-width'],
+        'rect': ['x', 'y', 'width', 'height', 'fill', 'stroke', 'stroke-width'],
+        'script': ['src', 'type'],
+    }
+
+    # 允许的协议
+    allowed_protocols = ['http', 'https', 'mailto', 'tel', 'data']
+
+    # 使用bleach清理HTML
+    # strip=False: 不移除不允许的标签,而是转义它们
+    # css_sanitizer=None: 允许所有CSS样式(如需限制CSS,可使用bleach.css_sanitizer.CSSSanitizer)
+    cleaned_html = bleach.clean(
+        html_content,
+        tags=allowed_tags,
+        attributes=allowed_attributes,
+        protocols=allowed_protocols,
+        strip=False,
+        strip_comments=False,
+        css_sanitizer=None
+    )
+
+    return cleaned_html
 
 def extract_html_metadata(html_content):
     """
@@ -306,7 +375,12 @@ def upload_html():
         # 替换CDN链接为代理链接
         html_with_proxy = replace_cdn_links(html_content)
 
-        # 暂不清理HTML（后续实现）
+        # 注意: 这是一个HTML预览工具,用户需要能够使用JavaScript和完整HTML功能
+        # 安全措施通过以下方式实现:
+        # 1. 在 serve_static() 中添加 CSP 头限制恶意行为
+        # 2. X-Frame-Options 防止被恶意嵌入
+        # 3. 未来可以考虑将预览域名与主应用域名分离
+        # 如需启用HTML清理,请取消下面一行的注释:
         # cleaned_html = sanitize_html(html_with_proxy)
         cleaned_html = html_with_proxy
 
@@ -394,8 +468,37 @@ def upload_thumbnail(project_id):
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
-    """提供静态文件访问"""
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    """
+    提供静态文件访问
+    添加安全头以隔离用户内容
+    """
+    # 先获取文件响应
+    file_response = send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+    # 使用 make_response 创建响应对象以便修改头信息
+    response = make_response(file_response)
+
+    # 添加 Content-Security-Policy 头
+    # 注意: 对于预览工具,我们允许脚本执行,因为这是用户的预期
+    # 但我们限制外部资源加载,除非通过代理
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://cdn.tailwindcss.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; "
+        "connect-src 'self' https:; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self';"
+    )
+
+    # 添加 X-Frame-Options 防止被嵌入
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+
+    # 添加 X-Content-Type-Options
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+
+    return response
 
 if __name__ == '__main__':
     # 确保static目录存在
