@@ -56,6 +56,13 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 port = os.environ.get('PORT', DEFAULT_PORT)
 
+# 项目列表缓存配置
+PROJECTS_CACHE = {
+    'data': None,  # 缓存的项目列表
+    'timestamp': 0,  # 缓存时间戳
+    'ttl': 300  # 缓存有效期(秒),默认5分钟
+}
+
 # 常见CDN域名列表
 CDN_DOMAINS = [
     'cdn.tailwindcss.com',
@@ -328,10 +335,30 @@ def has_thumbnail(project_id):
     thumbnail_path = os.path.join(app.config['UPLOAD_FOLDER'], project_id, 'thumbnail.png')
     return os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0
 
+def invalidate_projects_cache():
+    """
+    使项目列表缓存失效
+    在以下情况调用:上传项目、删除项目、清理过期项目、上传缩略图
+    """
+    PROJECTS_CACHE['data'] = None
+    PROJECTS_CACHE['timestamp'] = 0
+    logger.info("项目列表缓存已失效")
+
 def get_all_projects():
     """
     获取所有已部署的项目列表
+    使用缓存机制减少文件系统遍历开销
     """
+    # 检查缓存是否有效
+    current_time = time.time()
+    cache_age = current_time - PROJECTS_CACHE['timestamp']
+
+    if PROJECTS_CACHE['data'] is not None and cache_age < PROJECTS_CACHE['ttl']:
+        logger.debug(f"使用缓存的项目列表 (缓存年龄: {cache_age:.1f}秒)")
+        return PROJECTS_CACHE['data']
+
+    # 缓存无效或过期，重新获取项目列表
+    logger.info("重新获取项目列表并更新缓存")
     projects = []
     try:
         static_dir = app.config['UPLOAD_FOLDER']
@@ -370,6 +397,11 @@ def get_all_projects():
 
         # 按创建时间倒序排列
         projects.sort(key=lambda x: x['created_at'], reverse=True)
+
+        # 更新缓存
+        PROJECTS_CACHE['data'] = projects
+        PROJECTS_CACHE['timestamp'] = time.time()
+        logger.info(f"项目列表已缓存 (共 {len(projects)} 个项目)")
 
     except Exception as e:
         logger.error(f"获取项目列表失败: {e}")
@@ -506,6 +538,9 @@ def upload_html():
         # 生成访问URL
         host_url = get_host_url()
         access_url = f"{host_url}/static/{random_dir}/index.html"
+
+        # 使项目列表缓存失效
+        invalidate_projects_cache()
 
         return jsonify({
             'success': True,
@@ -665,6 +700,10 @@ def upload_thumbnail(project_id):
         if success:
             host_url = get_host_url()
             thumbnail_url = f"{host_url}/static/{project_id}/thumbnail.png"
+
+            # 使项目列表缓存失效(虽然缩略图不影响项目列表,但为了保持数据一致性)
+            invalidate_projects_cache()
+
             return jsonify({
                 'success': True,
                 'thumbnail_url': thumbnail_url,
@@ -707,6 +746,9 @@ def delete_project(project_id):
 
         # 删除整个项目目录
         shutil.rmtree(project_path)
+
+        # 使项目列表缓存失效
+        invalidate_projects_cache()
 
         return jsonify({
             'success': True,
@@ -766,6 +808,10 @@ def cleanup_expired_projects():
                 continue
 
         logger.info(f"自动清理任务完成，删除了 {deleted_count} 个过期项目")
+
+        # 如果删除了任何项目，使缓存失效
+        if deleted_count > 0:
+            invalidate_projects_cache()
 
     except Exception as e:
         logger.error(f"执行自动清理任务失败: {e}")
