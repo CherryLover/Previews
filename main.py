@@ -6,12 +6,15 @@ import json
 import datetime
 import base64
 import logging
+import time
+import shutil
 from flask import Flask, request, render_template, jsonify, send_from_directory, Response, make_response
 from bs4 import BeautifulSoup
 import bleach
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect, generate_csrf
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__, static_folder=None)  # 禁用默认静态文件夹,使用自定义路由
 
@@ -46,6 +49,8 @@ DEFAULT_PORT = 5010
 MAX_CONTENT_LENGTH = 1 * 1024 * 1024  # 1MB
 MAX_PROXY_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_STORAGE_QUOTA = 500 * 1024 * 1024  # 500MB 总存储配额
+PROJECT_EXPIRY_DAYS = int(os.environ.get('PROJECT_EXPIRY_DAYS', 30))  # 项目过期天数，默认30天
+CLEANUP_INTERVAL_HOURS = int(os.environ.get('CLEANUP_INTERVAL_HOURS', 24))  # 清理任务间隔，默认24小时
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
@@ -571,6 +576,43 @@ def get_storage_stats():
             'error': '获取存储统计失败,请稍后重试'
         }), 500
 
+@app.route('/api/cleanup/run', methods=['POST'])
+@limiter.limit("5 per hour")  # 手动清理速率限制
+def manual_cleanup():
+    """手动触发清理过期项目"""
+    try:
+        cleanup_expired_projects()
+        return jsonify({
+            'success': True,
+            'message': '清理任务已执行完成'
+        })
+    except Exception as e:
+        logger.error(f"手动清理失败: {e}")
+        return jsonify({
+            'success': False,
+            'error': '清理任务执行失败,请稍后重试'
+        }), 500
+
+@app.route('/api/cleanup/status', methods=['GET'])
+@csrf.exempt  # GET请求,只读操作,可以豁免CSRF
+def cleanup_status():
+    """获取清理任务状态和配置"""
+    try:
+        return jsonify({
+            'success': True,
+            'config': {
+                'expiry_days': PROJECT_EXPIRY_DAYS,
+                'cleanup_interval_hours': CLEANUP_INTERVAL_HOURS,
+                'enabled': scheduler.running
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取清理状态失败: {e}")
+        return jsonify({
+            'success': False,
+            'error': '获取清理状态失败,请稍后重试'
+        }), 500
+
 @app.route('/api/projects/<project_id>/upload-thumbnail', methods=['POST'])
 def upload_thumbnail(project_id):
     """上传项目缩略图"""
@@ -619,7 +661,6 @@ def upload_thumbnail(project_id):
 @limiter.limit("20 per hour")  # 删除速率限制
 def delete_project(project_id):
     """删除项目"""
-    import shutil
     try:
         # 检查项目是否存在
         project_path = os.path.join(app.config['UPLOAD_FOLDER'], project_id)
@@ -652,6 +693,69 @@ def delete_project(project_id):
             'success': False,
             'error': '删除项目失败,请稍后重试'
         }), 500
+
+def cleanup_expired_projects():
+    """
+    清理过期项目的后台任务
+    删除超过 PROJECT_EXPIRY_DAYS 天未访问的项目
+    """
+    try:
+        logger.info(f"开始执行自动清理任务，过期天数: {PROJECT_EXPIRY_DAYS}")
+        static_dir = app.config['UPLOAD_FOLDER']
+
+        if not os.path.exists(static_dir):
+            logger.info("静态文件目录不存在，跳过清理")
+            return
+
+        current_time = time.time()
+        expiry_seconds = PROJECT_EXPIRY_DAYS * 24 * 60 * 60
+        deleted_count = 0
+
+        for item in os.listdir(static_dir):
+            item_path = os.path.join(static_dir, item)
+
+            # 只处理目录
+            if not os.path.isdir(item_path):
+                continue
+
+            try:
+                # 获取项目的最后修改时间
+                # 使用 index.html 的修改时间作为参考
+                index_file = os.path.join(item_path, 'index.html')
+                if not os.path.exists(index_file):
+                    continue
+
+                # 获取文件的最后修改时间
+                last_modified = os.path.getmtime(index_file)
+                age_seconds = current_time - last_modified
+
+                # 如果项目过期，删除它
+                if age_seconds > expiry_seconds:
+                    logger.info(f"删除过期项目: {item}, 年龄: {age_seconds / (24*60*60):.1f} 天")
+                    shutil.rmtree(item_path)
+                    deleted_count += 1
+
+            except Exception as e:
+                logger.error(f"清理项目 {item} 时出错: {e}")
+                continue
+
+        logger.info(f"自动清理任务完成，删除了 {deleted_count} 个过期项目")
+
+    except Exception as e:
+        logger.error(f"执行自动清理任务失败: {e}")
+
+# 初始化后台调度器
+scheduler = BackgroundScheduler()
+scheduler.add_job(
+    func=cleanup_expired_projects,
+    trigger="interval",
+    hours=CLEANUP_INTERVAL_HOURS,
+    id='cleanup_expired_projects',
+    name='清理过期项目',
+    replace_existing=True
+)
+scheduler.start()
+logger.info(f"后台清理任务已启动，间隔: {CLEANUP_INTERVAL_HOURS} 小时")
 
 @app.route('/static/<path:filename>')
 @csrf.exempt  # 静态文件服务,可以豁免CSRF
@@ -708,4 +812,9 @@ if __name__ == '__main__':
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     # 从环境变量读取调试模式设置,生产环境应设置 DEBUG=False
     debug_mode = os.environ.get('DEBUG', 'False').lower() == 'true'
-    app.run(debug=debug_mode, port=port, host='0.0.0.0') 
+    try:
+        app.run(debug=debug_mode, port=port, host='0.0.0.0')
+    finally:
+        # 应用关闭时停止调度器
+        scheduler.shutdown()
+        logger.info("后台清理任务已停止") 
