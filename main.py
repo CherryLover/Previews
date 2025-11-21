@@ -5,13 +5,32 @@ import requests
 import json
 import datetime
 import base64
+import logging
 from flask import Flask, request, render_template, jsonify, send_from_directory, Response, make_response
 from bs4 import BeautifulSoup
 import bleach
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 
 app = Flask(__name__, static_folder=None)  # 禁用默认静态文件夹,使用自定义路由
+
+# 配置密钥（用于CSRF保护）
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+
+# 配置日志记录
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# 初始化CSRF保护
+csrf = CSRFProtect(app)
 
 # 配置速率限制
 limiter = Limiter(
@@ -72,7 +91,7 @@ def get_directory_size(path):
                 if not os.path.islink(file_path):
                     total_size += os.path.getsize(file_path)
     except Exception as e:
-        print(f"计算目录大小失败: {e}")
+        logger.error(f"计算目录大小失败: {e}")
     return total_size
 
 def check_storage_quota():
@@ -89,7 +108,7 @@ def check_storage_quota():
         is_within_quota = current_size < MAX_STORAGE_QUOTA
         return is_within_quota, current_size, MAX_STORAGE_QUOTA
     except Exception as e:
-        print(f"检查存储配额失败: {e}")
+        logger.error(f"检查存储配额失败: {e}")
         # 出错时保守策略：允许上传
         return True, 0, MAX_STORAGE_QUOTA
 
@@ -238,7 +257,7 @@ def save_project_metadata(project_id, metadata):
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        print(f"保存元数据失败: {e}")
+        logger.error(f"保存元数据失败: {e}")
         return False
 
 def load_project_metadata(project_id):
@@ -251,7 +270,7 @@ def load_project_metadata(project_id):
             with open(metadata_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except Exception as e:
-        print(f"加载元数据失败: {e}")
+        logger.error(f"加载元数据失败: {e}")
 
     # 如果没有元数据文件，尝试从HTML中提取
     try:
@@ -266,7 +285,7 @@ def load_project_metadata(project_id):
             ).isoformat()
             return metadata
     except Exception as e:
-        print(f"从HTML提取元数据失败: {e}")
+        logger.error(f"从HTML提取元数据失败: {e}")
 
     return {
         'id': project_id,
@@ -294,7 +313,7 @@ def save_thumbnail_from_base64(project_id, base64_data):
 
         return True
     except Exception as e:
-        print(f"保存缩略图失败: {e}")
+        logger.error(f"保存缩略图失败: {e}")
         return False
 
 def has_thumbnail(project_id):
@@ -348,7 +367,7 @@ def get_all_projects():
         projects.sort(key=lambda x: x['created_at'], reverse=True)
 
     except Exception as e:
-        print(f"获取项目列表失败: {e}")
+        logger.error(f"获取项目列表失败: {e}")
 
     return projects
 
@@ -357,8 +376,16 @@ def index():
     """主页面 - 显示HTML输入表单"""
     return render_template('index.html')
 
+@app.route('/api/csrf-token', methods=['GET'])
+@csrf.exempt  # 获取token的端点需要豁免CSRF检查
+def get_csrf_token():
+    """获取CSRF令牌"""
+    token = generate_csrf()
+    return jsonify({'csrf_token': token})
+
 @app.route('/proxy')
 @limiter.limit("100 per hour")  # CDN 代理速率限制
+@csrf.exempt  # GET请求且用于资源代理,可以豁免CSRF
 def proxy_resource():
     """代理外部CDN资源"""
     import urllib.parse
@@ -412,10 +439,13 @@ def proxy_resource():
         return flask_response
 
     except requests.exceptions.Timeout:
+        logger.warning(f"CDN代理请求超时: {decoded_url}")
         return jsonify({'error': '请求超时'}), 504
     except requests.exceptions.RequestException as e:
+        logger.error(f"CDN代理请求失败: {decoded_url}, 错误: {e}")
         return jsonify({'error': '请求失败'}), 502
     except Exception as e:
+        logger.error(f"CDN代理异常: {e}")
         return jsonify({'error': '代理失败'}), 500
 
 @app.route('/upload', methods=['POST'])
@@ -480,13 +510,17 @@ def upload_html():
         })
 
     except Exception as e:
+        # 记录详细错误到日志
+        logger.error(f"上传HTML失败: {e}")
         # 检查是否是413错误 (请求体过大)
         error_msg = str(e)
         if '413' in error_msg or 'Request Entity Too Large' in error_msg:
             return jsonify({'error': f'请求内容过大,最大允许{MAX_CONTENT_LENGTH / (1024*1024):.1f}MB'}), 413
+        # 返回通用错误信息，避免泄漏系统细节
         return jsonify({'error': '保存失败,请稍后重试'}), 500
 
 @app.route('/api/projects', methods=['GET'])
+@csrf.exempt  # GET请求,只读操作,可以豁免CSRF
 def get_projects():
     """获取所有已部署项目的API接口"""
     try:
@@ -497,12 +531,14 @@ def get_projects():
             'total': len(projects)
         })
     except Exception as e:
+        logger.error(f"获取项目列表失败: {e}")
         return jsonify({
             'success': False,
-            'error': f'获取项目列表失败: {str(e)}'
+            'error': '获取项目列表失败,请稍后重试'
         }), 500
 
 @app.route('/api/storage/stats', methods=['GET'])
+@csrf.exempt  # GET请求,只读操作,可以豁免CSRF
 def get_storage_stats():
     """获取存储使用统计信息"""
     try:
@@ -529,9 +565,10 @@ def get_storage_stats():
             }
         })
     except Exception as e:
+        logger.error(f"获取存储统计失败: {e}")
         return jsonify({
             'success': False,
-            'error': f'获取存储统计失败: {str(e)}'
+            'error': '获取存储统计失败,请稍后重试'
         }), 500
 
 @app.route('/api/projects/<project_id>/upload-thumbnail', methods=['POST'])
@@ -572,12 +609,52 @@ def upload_thumbnail(project_id):
             }), 500
 
     except Exception as e:
+        logger.error(f"上传缩略图失败: 项目ID={project_id}, 错误={e}")
         return jsonify({
             'success': False,
-            'error': f'上传缩略图失败: {str(e)}'
+            'error': '上传缩略图失败,请稍后重试'
+        }), 500
+
+@app.route('/api/projects/<project_id>', methods=['DELETE'])
+@limiter.limit("20 per hour")  # 删除速率限制
+def delete_project(project_id):
+    """删除项目"""
+    import shutil
+    try:
+        # 检查项目是否存在
+        project_path = os.path.join(app.config['UPLOAD_FOLDER'], project_id)
+        if not os.path.exists(project_path) or not os.path.isdir(project_path):
+            return jsonify({
+                'success': False,
+                'error': '项目不存在'
+            }), 404
+
+        # 验证路径安全性，防止目录遍历攻击
+        real_static_path = os.path.realpath(app.config['UPLOAD_FOLDER'])
+        real_project_path = os.path.realpath(project_path)
+        if not real_project_path.startswith(real_static_path):
+            return jsonify({
+                'success': False,
+                'error': '非法的项目路径'
+            }), 403
+
+        # 删除整个项目目录
+        shutil.rmtree(project_path)
+
+        return jsonify({
+            'success': True,
+            'message': '项目已成功删除'
+        })
+
+    except Exception as e:
+        logger.error(f"删除项目失败: 项目ID={project_id}, 错误={e}")
+        return jsonify({
+            'success': False,
+            'error': '删除项目失败,请稍后重试'
         }), 500
 
 @app.route('/static/<path:filename>')
+@csrf.exempt  # 静态文件服务,可以豁免CSRF
 def serve_static(filename):
     """
     提供静态文件访问
